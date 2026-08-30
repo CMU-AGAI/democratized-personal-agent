@@ -1,5 +1,4 @@
 # Hermes Agent over Signal (Qwen + Claude)
-
 A self-hosted **Nous Hermes Agent** you chat with **directly over Signal**, running
 as a Docker Compose stack on a machine with a GPU (Windows 11 is the reference
 setup, and Ubuntu and macOS are covered below). The agent is stateful
@@ -11,8 +10,10 @@ between in chat:
 - **Claude** via the **Claude Code CLI on your Max subscription** — no API key, no credits. `/model claude-max`
 - **Free web search** via self-hosted **SearXNG**, wired into the agent as an MCP tool.
 
-There is no command router and no HTTP middle layer — you talk to the agent itself.
+There is no command router and no HTTP middle layer - you talk to the agent itself.
 Nothing here costs API credits.
+
+Before proceeding in the ReadMe, I highly encourage you to watch [this introductory video](https://youtu.be/LXyoH8mKXWU).
 
 ### Services (6)
 
