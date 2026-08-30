@@ -1,0 +1,51 @@
+# Minimal SearXNG config for internal API use by the searxng-mcp server.
+# Inherits SearXNG defaults; only the keys below are overridden.
+use_default_settings: true
+
+server:
+  # Internal-only service (not published to the host). Change if you like.
+  secret_key: "change-me-hermes-searxng-secret-key"
+  # Disable the bot limiter so the worker can query the JSON API.
+  limiter: false
+  image_proxy: false
+
+search:
+  # Enable the JSON API the worker uses (in addition to the HTML UI).
+  formats:
+    - html
+    - json
+  safe_search: 0
+
+# Give engines more time before they're marked unresponsive (6s was too tight and
+# led to empty results when engines were merely slow). Raise the pool too.
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+
+# Engine tuning for a self-hosted instance (no API keys). Some scrapers break or
+# hard-block datacenter IPs and return nothing; disable those and lean on the
+# ones that stay reliable. Flip `disabled` to taste.
+engines:
+  # Google's HTML scraper breaks on datacenter IPs (IndexError: list index out of
+  # range) and returns zero results -- disable it.
+  - name: google
+    disabled: true
+  # Startpage commonly blocks self-hosted instances too.
+  - name: startpage
+    disabled: true
+  # Brave returns 429 quickly when self-hosted -- keep off to avoid noise.
+  - name: brave
+    disabled: true
+  # Reliable no-key engines to carry the search (explicitly enabled).
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: qwant
+    disabled: false

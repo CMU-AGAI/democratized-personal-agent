@@ -1,0 +1,3 @@
+# This folder is seeded to <HERMES_WORKSPACE>/hermes/shared and mounted into the
+# agent at /opt/data/shared. Files the agent writes for you (and files you drop
+# for the agent) live here; they are visible on the host.

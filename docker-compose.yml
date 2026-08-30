@@ -1,0 +1,231 @@
+name: hermes-qwen-claude-signal
+
+# Cap container logs so they can't grow unbounded (Docker keeps them forever by
+# default). 10 MB x 3 files = ~30 MB max per container. Referenced by every
+# service below as `logging: *default-logging`.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # The Nous Research Hermes Agent IS the application now. It owns the Signal
+  # conversation directly (native Signal adapter), keeps memory/skills/sessions,
+  # can message you proactively (cron + SIGNAL_HOME_CHANNEL), and reaches two
+  # models via its `custom` providers:
+  #   - Qwen 3.6  -> the local Ollama  (/model qwen)
+  #   - Claude    -> claude-adapter -> Claude Code on your Max subscription (/model claude)
+  # All durable state lives in /opt/data, bind-mounted to the host.
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    logging: *default-logging
+    restart: unless-stopped
+    command: gateway run
+    # (ollama is not listed: the agent only ever talks to claude-adapter, which
+    # proxies to whichever Ollama OLLAMA_URL names - the container or the host.)
+    depends_on:
+      - signal-cli
+      - claude-adapter
+      - searxng-mcp
+    networks:
+      - agent_net
+    environment:
+      # --- Signal (native adapter -> signal-cli HTTP daemon) ---
+      SIGNAL_HTTP_URL: http://signal-cli:8080
+      SIGNAL_ACCOUNT: ${SIGNAL_ACCOUNT:-}
+      # Gate who may talk to / command the agent. Empty falls back to pairing
+      # codes; set SIGNAL_ALLOW_ALL_USERS=true only for throwaway testing.
+      SIGNAL_ALLOWED_USERS: ${SIGNAL_ALLOWED_USERS:-}
+      SIGNAL_GROUP_ALLOWED_USERS: ${SIGNAL_GROUP_ALLOWED_USERS:-}
+      # Where the agent delivers proactive / scheduled (cron) messages.
+      SIGNAL_HOME_CHANNEL: ${SIGNAL_HOME_CHANNEL:-${SIGNAL_ACCOUNT:-}}
+      # --- Dashboard (optional; localhost only, see scripts\setup-hermes-dashboard.ps1) ---
+      HERMES_DASHBOARD: ${HERMES_DASHBOARD:-0}
+      TZ: ${TZ:-America/New_York}
+    ports:
+      # Dashboard on localhost only (tunnel for remote). Enable + set a password
+      # with: .\scripts\setup-hermes-dashboard.ps1
+      - "127.0.0.1:${HERMES_DASHBOARD_PORT:-9119}:9119"
+    volumes:
+      # The single shared folder between the agent and the host:
+      # config.yaml, .env, memories/, skills/, sessions/, cron/.
+      - type: bind
+        source: ${HERMES_WORKSPACE:-./workspace}/hermes
+        target: /opt/data
+    security_opt:
+      - no-new-privileges:true
+
+  # signal-cli as an HTTP daemon — the transport Hermes' native Signal adapter
+  # speaks. Link your number once with:  docker compose run --rm signal-cli link.sh
+  signal-cli:
+    build:
+      context: ./signal-cli
+    container_name: signal-cli
+    logging: *default-logging
+    restart: unless-stopped
+    networks:
+      - agent_net
+    environment:
+      SIGNAL_ACCOUNT: ${SIGNAL_ACCOUNT:-}
+    expose:
+      - "8080"   # internal HTTP daemon (the agent reaches it by service name)
+    volumes:
+      - signal_data:/data
+
+  # Only started when the "gpu" profile is active (COMPOSE_PROFILES=gpu in .env,
+  # the default). On macOS, or on Linux without an NVIDIA GPU, leave
+  # COMPOSE_PROFILES empty, run Ollama natively on the host, and point
+  # OLLAMA_URL at it (http://host.docker.internal:11434).
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-qwen
+    profiles: ["gpu"]
+    logging: *default-logging
+    restart: unless-stopped
+    environment:
+      # Keep the model resident in VRAM instead of unloading after ~5 min idle,
+      # so a sporadic Signal message doesn't pay a multi-GB reload each time.
+      OLLAMA_KEEP_ALIVE: "-1"
+      # Default context window for ALL requests. The OpenAI-compatible endpoint
+      # (used by the gateway proxy) can't set num_ctx per-request, so set the
+      # server default here. Keep it at your VRAM budget (8192).
+      OLLAMA_CONTEXT_LENGTH: "${QWEN_NUM_CTX:-8192}"
+    networks:
+      - agent_net
+    expose:
+      - "11434"
+    # Dedicate a single NVIDIA GPU to Ollama (needs the NVIDIA Container
+    # Toolkit on Linux, or Docker Desktop's WSL 2 GPU support on Windows).
+    # OLLAMA_GPU_ID selects which physical GPU by index or UUID (`nvidia-smi -L`).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "${OLLAMA_GPU_ID:-0}"
+              capabilities:
+                - gpu
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    volumes:
+      - ollama_data:/root/.ollama
+
+  # Claude on your Max subscription with NO Anthropic API key / credits. The agent
+  # uses this as a `custom` OpenAI-compatible provider; the gateway routes any
+  # model name containing "claude" to the Claude Code CLI (subscription auth).
+  claude-adapter:
+    build:
+      context: ./claude-adapter
+    container_name: claude-adapter
+    logging: *default-logging
+    restart: unless-stopped
+    networks:
+      - agent_net
+    # In-container root: Windows bind mounts (the /opt/data agent data dir)
+    # often surface root-owned with no access for other uids, which broke the
+    # claude lane for a non-root user (PermissionError on /opt/data).
+    # Compensating controls stay: no-new-privileges, internal-only network, and
+    # cap_drop ALL below with only the file-access DAC caps re-added.
+    user: "0:0"
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN_FILE: /run/secrets/claude_code_oauth_token
+      # Claude Code refuses --dangerously-skip-permissions as uid 0 unless it
+      # is told it's inside a sandbox — which this hardened container is.
+      IS_SANDBOX: "1"
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-4-8}
+      # The agent's single provider points here; this gateway routes "claude" ->
+      # Claude Code and anything else -> Ollama. Default = the ollama container;
+      # set OLLAMA_URL=http://host.docker.internal:11434 for a host-native Ollama.
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      QWEN_MODEL: ${QWEN_MODEL:-batiai/qwen3.6-27b:q3}
+      QWEN_NUM_CTX: ${QWEN_NUM_CTX:-8192}
+      # Claude Code tool permissions on the claude lane. Default: bypass ALL
+      # permission prompts (owner's choice — headless -p can't show prompts).
+      # Set false to use the CLAUDE_ALLOWED_TOOLS allowlist instead (no Bash).
+      CLAUDE_BYPASS_PERMISSIONS: ${CLAUDE_BYPASS_PERMISSIONS:-true}
+      CLAUDE_ALLOWED_TOOLS: ${CLAUDE_ALLOWED_TOOLS:-Read,Glob,Grep,Write,Edit,WebFetch,WebSearch}
+      # Tool-using pipeline turns need more than the old 180s text-only budget.
+      CLAUDE_TIMEOUT: ${CLAUDE_TIMEOUT:-600}
+      TZ: ${TZ:-America/New_York}
+    expose:
+      - "8080"
+    secrets:
+      - claude_code_oauth_token
+    volumes:
+      # Persist Claude Code's config/cache (auth state) across restarts.
+      - claude_config:/home/appuser/.claude
+      # The Hermes agent data dir, same path as in hermes-agent (/opt/data): the
+      # claude lane IS Claude Code, and its file tools read and write the shared
+      # folder (shared/) and skills/.
+      - type: bind
+        source: ${HERMES_WORKSPACE:-./workspace}/hermes
+        target: /opt/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Only the DAC file-permission caps come back (needed by in-container root
+    # to use the Windows-mounted /opt/data and the appuser-owned config volume).
+    cap_add:
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+
+  # Self-hosted metasearch — the agent's FREE web-search backend. No API key.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    logging: *default-logging
+    restart: unless-stopped
+    networks:
+      - agent_net
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+    expose:
+      - "8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    security_opt:
+      - no-new-privileges:true
+
+  # SearXNG exposed to the agent as a streamable-HTTP MCP server (so it works even
+  # if the hermes-agent image has no `npx` for a stdio MCP server). The agent
+  # connects by URL — see mcp_servers.searxng in hermes/config.example.yaml:
+  #   url: http://searxng-mcp:8090/mcp
+  searxng-mcp:
+    build:
+      context: ./searxng-mcp
+    container_name: searxng-mcp
+    logging: *default-logging
+    restart: unless-stopped
+    depends_on:
+      - searxng
+    networks:
+      - agent_net
+    environment:
+      # The wrapped stdio mcp-searxng server reads this; supergateway serves it at
+      # /mcp on 0.0.0.0:8090 (supergateway-wrapped stdio mcp-searxng).
+      SEARXNG_URL: http://searxng:8080
+    expose:
+      - "8090"
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  agent_net:
+    driver: bridge
+
+volumes:
+  ollama_data:
+  signal_data:
+  claude_config:
+
+secrets:
+  claude_code_oauth_token:
+    file: ./secrets/claude_code_oauth_token.txt

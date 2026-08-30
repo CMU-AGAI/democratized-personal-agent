@@ -1,0 +1,8 @@
+.env
+secrets/claude_code_oauth_token.txt
+workspace/**
+!workspace/.gitkeep
+!workspace/**/.gitkeep
+__pycache__/
+*.pyc
+.claude/settings.local.json

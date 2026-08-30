@@ -1,0 +1,101 @@
+# Hermes Agent config — copy to your data dir as config.yaml:
+#   <HERMES_WORKSPACE>/hermes/config.yaml   (e.g. D:\hermes-shared-data\hermes\config.yaml)
+# (scripts\up.ps1 seeds this automatically on first run.)
+#
+# This single agent owns the Signal conversation and talks to TWO models through
+# OpenAI-compatible `custom` providers. Switch between them mid-chat over Signal
+# with the built-in slash command:
+#   /model qwen-local    -> local Qwen 3.6 on Ollama          (free, fast-ish)
+#   /model claude-max    -> Claude on your Max subscription   (via claude-adapter; no API key)
+# (Use these collision-proof names: bare "qwen"/"claude" can fuzzy-match the
+#  agent's BUILT-IN catalog — e.g. OpenRouter's anthropic/claude-3-haiku — and
+#  land on a provider with no API key.)
+#
+# NOTE on schema: the exact key names for multiple named providers can vary by
+# Hermes version. The most reliable way to register them is the one-time wizard
+# (writes the correct schema into THIS file):
+#   docker compose exec hermes-agent hermes model
+# Register two custom providers pointing at the URLs below, then `/model` switches
+# between them. The block below is a best-effort seed of that same intent.
+
+# ONE OpenAI-compatible provider: the claude-adapter gateway. It routes by model
+# NAME -- "claude" -> Claude Code (your subscription); anything else -> the shared
+# Ollama Qwen (the gateway maps the alias "qwen" to the real Ollama tag). So you
+# switch models just by switching the model name -- no second provider to set up.
+# Default = Qwen (no subscription usage until you pick claude).
+model:
+  provider: custom
+  base_url: http://claude-adapter:8080/v1
+  default: qwen
+  api_key: null
+  # Hermes refuses any model advertising < 64K context. This value is METADATA
+  # ONLY and costs ZERO VRAM -- it just satisfies that check. Actual KV-cache VRAM
+  # is set by QWEN_NUM_CTX (.env); keep it small (e.g. 8192) on a 20GB GPU.
+  # Consequence: Hermes budgets for 64K but Ollama only serves QWEN_NUM_CTX tokens,
+  # silently dropping the oldest tokens on long turns. Fine for short Signal chats;
+  # use /model claude-max (1M context) for genuinely long inputs.
+  context_length: 65536
+# Switch in chat:   /model claude-max   (Claude, subscription)
+#                   /model qwen-local   (local Qwen 3.6)
+# Cron jobs pin a model the same way (ask the agent to create them in chat).
+
+# Self-hosted SearXNG exposed to the agent as MCP tools (mcp_searxng_*). We keep
+# this ALONGSIDE the agent's built-in DuckDuckGo web search: DuckDuckGo is the
+# primary, SearXNG is the block-resistant FALLBACK. The "use SearXNG when
+# DuckDuckGo is blocked" ordering is a policy you teach the agent once via memory
+# (there is no automatic tool failover) -- see README "Web search with fallback".
+#
+# Connect to the `searxng-mcp` container (streamable-HTTP MCP), so it works
+# regardless of whether the agent image has `npx`. It serves /mcp.
+# NOTE: the agent serializes its in-memory config back to config.yaml on saves
+# (model switch, migrations) and ERASES hand-appended keys. This block only
+# survives when the agent loaded it at startup. On a live deployment, register
+# the server through the agent's own CLI instead of editing this file:
+#   docker compose exec hermes-agent hermes mcp add searxng --url "http://searxng-mcp:8090/mcp"
+# (scripts\up.ps1 offers exactly that when the registration is missing.)
+mcp_servers:
+  searxng:
+    url: "http://searxng-mcp:8090/mcp"
+    # Expose only the 2 tools the agent needs (search + read a URL) instead of the
+    # 6 the server offers -- smaller request. (The exact key for tool filtering can
+    # vary by Hermes version; `hermes mcp --help` / the docs confirm it.)
+    tools:
+      include:
+        - searxng_web_search
+        - web_url_read
+  # No filesystem MCP: the built-in `file` toolset (kept below) already reads/writes
+  # the shared folder (/opt/data/shared), so a separate server would be redundant
+  # and add 12 tool schemas. (To re-add it, see git history / the searxng entry.)
+
+# Toolset trimming (Balanced profile) -- shrink the per-request tool schemas so the
+# agent can fit a small (8K) context. KEPT: web, search, file, terminal, todo,
+# skills, session_search (+ memory & scheduling, always on). `web` stays enabled so
+# the built-in DuckDuckGo search remains the PRIMARY, with the SearXNG MCP as
+# fallback. Run `hermes tools` to see all toolset names; add/remove here to taste.
+agent:
+  disabled_toolsets:
+    - browser
+    - coding
+    - computer_use
+    - delegation
+    - discord
+    - discord_admin
+    - feishu_doc
+    - feishu_drive
+    - homeassistant
+    - image_gen
+    - kanban
+    - project
+    - spotify
+    - tts
+    - video
+    - video_gen
+    - vision
+    - x_search
+    - yuanbao
+
+# Memory (MEMORY.md / USER.md), skills, sessions, and cron jobs are created by
+# Hermes under this same data dir (/opt/data), so they show up on the Windows
+# host under <HERMES_WORKSPACE>/hermes/. Proactive/scheduled messages are sent to
+# SIGNAL_HOME_CHANNEL (set in .env / docker-compose). Schedule them in chat, e.g.
+#   "every morning at 8am send me my agenda"
